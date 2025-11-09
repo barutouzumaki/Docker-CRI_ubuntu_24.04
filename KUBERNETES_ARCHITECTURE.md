@@ -43,6 +43,168 @@ Kubernetes is a container orchestration platform that automates the deployment, 
 └──────────────┘ └──────────────┘ └──────────────┘
 ```
 
+### Kubernetes Request Flow
+
+#### Pod Creation Request Flow
+
+```
+┌─────────────┐
+│   kubectl   │  User creates pod via kubectl
+│   / Client  │
+└──────┬──────┘
+       │
+       │ 1. POST /api/v1/namespaces/{namespace}/pods
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│              kube-apiserver                              │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Authentication & Authorization (RBAC)           │  │
+│  │  Admission Controllers (Validating/Mutating)     │  │
+│  │  Schema Validation                                │  │
+│  └──────────────────────────────────────────────────┘  │
+└──────┬──────────────────────────────────────────────────┘
+       │
+       │ 2. Store in etcd
+       ▼
+┌─────────────┐
+│    etcd     │  Cluster state stored
+└──────┬──────┘
+       │
+       │ 3. Watch event notification
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│        kube-controller-manager                          │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Replication Controller                         │  │
+│  │  - Watches for new pods                         │  │
+│  │  - Ensures desired state                        │  │
+│  └──────────────────────────────────────────────────┘  │
+└──────┬──────────────────────────────────────────────────┘
+       │
+       │ 4. Watch event notification
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│           kube-scheduler                                │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Filter Phase: Find feasible nodes              │  │
+│  │  Score Phase: Rank nodes by priority           │  │
+│  │  Bind Phase: Assign pod to selected node       │  │
+│  └──────────────────────────────────────────────────┘  │
+└──────┬──────────────────────────────────────────────────┘
+       │
+       │ 5. Update pod with node assignment
+       ▼
+┌─────────────┐
+│    etcd     │  Pod status updated
+└──────┬──────┘
+       │
+       │ 6. Watch event notification
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│              kubelet (on assigned node)                  │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  - Watches API server for pod assignments       │  │
+│  │  - Creates pod sandbox via CRI                  │  │
+│  │  - Pulls container images                       │  │
+│  │  - Creates and starts containers                │  │
+│  │  - Sets up networking (CNI)                      │  │
+│  │  - Mounts volumes (CSI)                         │  │
+│  │  - Reports status back to API server            │  │
+│  └──────────────────────────────────────────────────┘  │
+└──────┬──────────────────────────────────────────────────┘
+       │
+       │ 7. CRI calls
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│         Container Runtime (Docker/containerd/CRI-O)      │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  - Creates container                             │  │
+│  │  - Manages container lifecycle                    │  │
+│  │  - Handles container networking                   │  │
+│  └──────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### Service Request Flow
+
+```
+┌─────────────┐
+│   Client    │  External request to service
+└──────┬──────┘
+       │
+       │ 1. DNS lookup or direct IP
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│              kube-proxy                                  │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Mode: iptables / IPVS / userspace              │  │
+│  │  - Watches API server for Service/Endpoint      │  │
+│  │  - Creates iptables/IPVS rules                  │  │
+│  │  - Load balances to backend pods                │  │
+│  └──────────────────────────────────────────────────┘  │
+└──────┬──────────────────────────────────────────────────┘
+       │
+       │ 2. Route to pod
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│              Pod (Container)                            │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Application receives request                    │  │
+│  │  Processes and responds                          │  │
+│  └──────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### Control Plane Component Interaction Flow
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Control Plane                         │
+│                                                          │
+│  ┌──────────────┐         ┌──────────────┐            │
+│  │ kube-        │◄────────►│    etcd      │            │
+│  │ apiserver    │  Read/  │  (State      │            │
+│  │              │  Write  │   Store)     │            │
+│  └──────┬───────┘         └──────────────┘            │
+│         │                                              │
+│         │ Watch API                                    │
+│         │                                              │
+│  ┌──────▼───────┐         ┌──────────────┐            │
+│  │ kube-        │         │ kube-        │            │
+│  │ scheduler    │         │ controller-  │            │
+│  │              │         │ manager      │            │
+│  │ - Filters    │         │ - Node       │            │
+│  │ - Scores     │         │ - Replica    │            │
+│  │ - Binds      │         │ - Endpoint   │            │
+│  └──────────────┘         └──────────────┘            │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+         │
+         │ API Calls
+         │
+┌────────▼─────────────────────────────────────────────────┐
+│                    Worker Nodes                          │
+│                                                          │
+│  ┌──────────────┐         ┌──────────────┐            │
+│  │   kubelet     │         │  kube-proxy   │            │
+│  │               │         │               │            │
+│  │ - Pod mgmt    │         │ - Service     │            │
+│  │ - Health      │         │   routing     │            │
+│  │   checks      │         │ - Load        │            │
+│  │ - CRI calls   │         │   balancing   │            │
+│  └──────┬────────┘         └───────────────┘            │
+│         │                                                 │
+│         │ CRI API                                         │
+│         │                                                 │
+│  ┌──────▼────────┐                                        │
+│  │ Container     │                                        │
+│  │ Runtime       │                                        │
+│  │ (Docker/      │                                        │
+│  │  containerd)  │                                        │
+│  └───────────────┘                                        │
+└───────────────────────────────────────────────────────────┘
+```
+
 ### Key Concepts
 
 - **Cluster**: A set of nodes (machines) that run containerized applications
